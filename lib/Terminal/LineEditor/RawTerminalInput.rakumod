@@ -1,6 +1,6 @@
 # ABSTRACT: Input widgets for raw terminal text input
 
-use Terminal::MakeRaw;
+use Terminal::API;
 use Terminal::ANSIParser;
 use Terminal::LineEditor::DuospaceInput;
 use Terminal::LineEditor::History;
@@ -311,7 +311,7 @@ role Terminal::LineEditor::RawTerminalIO {
     has atomicint              $!done          = 0;
     has                        $!parse         = make-ansi-parser(emit-item => { $!raw-supplier.emit($_) });
     has MouseEventMode:D       $!previous-mouse-mode = MouseNoEvents;
-    has                        $!saved-termios;
+    has                        $!saved-term-config;
     has                        @!active-queries;
 
     #| Atomically set done, even from outside role
@@ -325,10 +325,10 @@ role Terminal::LineEditor::RawTerminalIO {
         # termios), then start the parser, save current TTY mode, flush
         # previous I/O, and convert TTY to raw mode
 
-        if $.input.t && !$!saved-termios {
+        if $.input.t && !$!saved-term-config {
             my $fd = $.input.native-descriptor;
-            $!saved-termios = Terminal::MakeRaw::getattr($fd);
-            Terminal::MakeRaw::makeraw($fd, :FLUSH);
+            $!saved-term-config = Terminal::API::get-config($fd);
+            Terminal::API::make-raw($fd, :when(Terminal::API::FLUSH));
 
             $!done ⚛= 0;
             self.start-parser;
@@ -341,11 +341,11 @@ role Terminal::LineEditor::RawTerminalIO {
         # mark the saved termios as unused, and optionally output a \n to push
         # the cursor to the start of the next line
 
-        if $!saved-termios {
+        if $!saved-term-config {
             $!done ⚛= 1;
             my $fd = $.input.native-descriptor;
-            Terminal::MakeRaw::setattr($fd, $!saved-termios, :DRAIN);
-            $!saved-termios = Nil;
+            Terminal::API::restore-config($!saved-term-config, $fd, :when(Terminal::API::DRAIN));
+            $!saved-term-config = Nil;
             $.output.put('') if $nl;
         }
     }
@@ -565,20 +565,9 @@ role Terminal::LineEditor::RawTerminalUtils {
     #| Detect terminal size, returning a Promise that will be kept with
     #| (rows, cols) or Empty if unable
     method detect-terminal-size() {
-        # XXXX: This query has been found to have compatibility problems; it
-        #       works in xterm and libvte terminals, but not in many others
-        #       such as Konsole, Windows Console, linux, etc.
-        # my $response = self.query-terminal("\e[18t", 't');
-        # $response ~~ /^ "\e[8;" (\d+) ';' (\d+) 't' $/ ?? (+$0, +$1) !! Empty
-
-        # Instead of the above, take advantage of clipping behavior of cursor
-        # movement commands by saving the cursor, requesting a move way outside
-        # the terminal, detecting the cursor position, and restoring the cursor.
-
-        $.output.print("\e7\e[9999;9999H");
-        my $p := self.detect-cursor-pos;
-        $.output.print("\e8");
-        $p
+        my $fd = $.output.native-descriptor;
+        my $size = Terminal::API::get-window-size($fd);
+        Promise.kept(($size.rows, $size.cols))
     }
 
     #| Suspend using SIGTSTP job control, switching back to normal mode first;
